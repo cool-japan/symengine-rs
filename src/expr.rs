@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::os::raw::{c_int, c_ulong};
 
 use symengine_sys::*;
 use crate::{SymEngineError, SymEngineResult};
@@ -9,8 +10,23 @@ use crate::{SymEngineError, SymEngineResult};
 #[cfg(feature = "serde-serialize")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[derive(Debug)]
 pub struct Expression {
     pub(crate) basic: UnsafeCell<basic_struct>,
+}
+
+// SymEngine basic_struct is thread-safe for read operations when properly synchronized
+unsafe impl Send for Expression {}
+unsafe impl Sync for Expression {}
+
+impl Clone for Expression {
+    fn clone(&self) -> Self {
+        let mut new = Expression {
+            basic: UnsafeCell::new(unsafe { std::mem::zeroed() }),
+        };
+        unsafe { basic_assign(new.basic.get(), self.basic.get()) };
+        new
+    }
 }
 
 impl Expression {
@@ -27,7 +43,7 @@ impl Expression {
             };
             basic_new_stack(new.basic.get());
             let result = basic_parse(new.basic.get(), expr.as_ptr());
-            if result != 0 {
+            if result != CWRAPPER_OUTPUT_TYPE::SYMENGINE_NO_EXCEPTION {
                 // If parsing failed, create a symbol instead
                 eprintln!("Warning: Failed to parse '{}', treating as symbol", expr.to_string_lossy());
             }
@@ -51,7 +67,7 @@ impl Expression {
             };
             basic_new_stack(new.basic.get());
             let result = basic_parse(new.basic.get(), expr.as_ptr());
-            if result != 0 {
+            if result != CWRAPPER_OUTPUT_TYPE::SYMENGINE_NO_EXCEPTION {
                 return Err(SymEngineError::ParseError);
             }
             Ok(new)
@@ -77,7 +93,7 @@ impl Expression {
 
     pub fn from_value<T, F>(f: F, value: T) -> Self
     where
-        F: Fn(*mut basic_struct, T) -> c_int,
+        F: Fn(*mut basic_struct, T) -> CWRAPPER_OUTPUT_TYPE,
     {
         unsafe {
             let mut basic: basic_struct = std::mem::zeroed();
@@ -91,26 +107,26 @@ impl Expression {
     }
 
     pub fn from_i64(value: i64) -> Self {
-        Self::from_value(integer_set_si, value)
+        Self::from_value(|ptr, val| unsafe { integer_set_si(ptr, val) }, value)
     }
 
     pub fn from_i32(value: i32) -> Self {
-        Self::from_value(integer_set_si, value as i64)
+        Self::from_value(|ptr, val| unsafe { integer_set_si(ptr, val) }, value as i64)
     }
 
     pub fn from_u32(value: u32) -> Self {
-        Self::from_value(integer_set_ui, value as c_ulong)
+        Self::from_value(|ptr, val| unsafe { integer_set_ui(ptr, val) }, value as c_ulong)
     }
 
     pub fn from_f64(value: f64) -> Self {
-        Self::from_value(real_double_set_d, value)
+        Self::from_value(|ptr, val| unsafe { real_double_set_d(ptr, val) }, value)
     }
 
     pub fn from_f32(value: f32) -> Self {
-        Self::from_value(real_double_set_d, value as f64)
+        Self::from_value(|ptr, val| unsafe { real_double_set_d(ptr, val) }, value as f64)
     }
 
-    pub fn clone(&self) -> Self {
+    pub fn assign_copy(&self) -> Self {
         let mut new = Expression {
             basic: UnsafeCell::new(unsafe { std::mem::zeroed() }),
         };
@@ -138,7 +154,7 @@ impl<T: Into<Self>> std::ops::Add<T> for Expression {
     type Output = Self;
 
     fn add(self, rhs: T) -> Self::Output {
-        self.binary_op(rhs.into(), basic_add)
+        self.binary_op(rhs.into(), |result, a, b| unsafe { basic_add(result, a, b) })
     }
 }
 
@@ -146,7 +162,7 @@ impl<T: Into<Self>> std::ops::Sub<T> for Expression {
     type Output = Self;
 
     fn sub(self, rhs: T) -> Self::Output {
-        self.binary_op(rhs.into(), basic_sub)
+        self.binary_op(rhs.into(), |result, a, b| unsafe { basic_sub(result, a, b) })
     }
 }
 
@@ -154,7 +170,7 @@ impl<T: Into<Self>> std::ops::Mul<T> for Expression {
     type Output = Self;
 
     fn mul(self, rhs: T) -> Self::Output {
-        self.binary_op(rhs.into(), basic_mul)
+        self.binary_op(rhs.into(), |result, a, b| unsafe { basic_mul(result, a, b) })
     }
 }
 
@@ -162,7 +178,7 @@ impl<T: Into<Self>> std::ops::Div<T> for Expression {
     type Output = Self;
 
     fn div(self, rhs: T) -> Self::Output {
-        self.binary_op(rhs.into(), basic_div)
+        self.binary_op(rhs.into(), |result, a, b| unsafe { basic_div(result, a, b) })
     }
 }
 
@@ -199,7 +215,7 @@ impl From<f32> for Expression {
 impl Expression {
     fn binary_op<F>(self, other: Self, op: F) -> Self
     where
-        F: Fn(*mut basic_struct, *mut basic_struct, *mut basic_struct) -> c_int,
+        F: Fn(*mut basic_struct, *mut basic_struct, *mut basic_struct) -> CWRAPPER_OUTPUT_TYPE,
     {
         unsafe {
             let mut new = Expression {
@@ -224,7 +240,7 @@ impl Expression {
 
     fn cmp_eq_op<F>(&self, other: &Self, op: F) -> bool
     where
-        F: Fn(*mut basic_struct, *mut basic_struct) -> i32,
+        F: Fn(*const basic_struct, *const basic_struct) -> i32,
     {
         let lhs = self.expand();
         let rhs = other.expand();
@@ -235,7 +251,7 @@ impl Expression {
 
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp_eq_op(other, basic_eq)
+        self.cmp_eq_op(other, |a, b| unsafe { basic_eq(a, b) })
     }
 }
 
