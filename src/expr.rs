@@ -24,7 +24,10 @@ impl Clone for Expression {
         let mut new = Expression {
             basic: UnsafeCell::new(unsafe { std::mem::zeroed() }),
         };
-        unsafe { basic_assign(new.basic.get(), self.basic.get()) };
+        unsafe { 
+            basic_new_stack(new.basic.get());
+            basic_assign(new.basic.get(), self.basic.get());
+        };
         new
     }
 }
