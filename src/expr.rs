@@ -161,6 +161,14 @@ impl<T: Into<Self>> std::ops::Add<T> for Expression {
     }
 }
 
+impl<T: Into<Expression>> std::ops::Add<T> for &Expression {
+    type Output = Expression;
+
+    fn add(self, rhs: T) -> Self::Output {
+        self.clone().binary_op(rhs.into(), |result, a, b| unsafe { basic_add(result, a, b) })
+    }
+}
+
 impl<T: Into<Self>> std::ops::Sub<T> for Expression {
     type Output = Self;
 
@@ -174,6 +182,14 @@ impl<T: Into<Self>> std::ops::Mul<T> for Expression {
 
     fn mul(self, rhs: T) -> Self::Output {
         self.binary_op(rhs.into(), |result, a, b| unsafe { basic_mul(result, a, b) })
+    }
+}
+
+impl<T: Into<Expression>> std::ops::Mul<T> for &Expression {
+    type Output = Expression;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        self.clone().binary_op(rhs.into(), |result, a, b| unsafe { basic_mul(result, a, b) })
     }
 }
 
@@ -215,6 +231,12 @@ impl From<f32> for Expression {
     }
 }
 
+impl Default for Expression {
+    fn default() -> Self {
+        Self::from_i64(0)
+    }
+}
+
 impl Expression {
     fn binary_op<F>(self, other: Self, op: F) -> Self
     where
@@ -237,6 +259,165 @@ impl Expression {
             };
             basic_new_stack(new.basic.get());
             basic_expand(new.basic.get(), self.basic.get());
+            new
+        }
+    }
+
+    /// Check if the expression is a symbol
+    pub fn is_symbol(&self) -> bool {
+        unsafe {
+            basic_get_type(self.basic.get()) == SYMENGINE_SYMBOL
+        }
+    }
+
+    /// Check if the expression is a number
+    pub fn is_number(&self) -> bool {
+        unsafe {
+            let type_code = basic_get_type(self.basic.get());
+            type_code == SYMENGINE_INTEGER || 
+            type_code == SYMENGINE_RATIONAL ||
+            type_code == SYMENGINE_REAL_DOUBLE
+        }
+    }
+
+    /// Check if the expression is a power operation
+    pub fn is_pow(&self) -> bool {
+        unsafe {
+            basic_get_type(self.basic.get()) == SYMENGINE_POW
+        }
+    }
+
+    /// Check if the expression is a multiplication
+    pub fn is_mul(&self) -> bool {
+        unsafe {
+            basic_get_type(self.basic.get()) == SYMENGINE_MUL
+        }
+    }
+
+    /// Check if the expression is an addition
+    pub fn is_add(&self) -> bool {
+        unsafe {
+            basic_get_type(self.basic.get()) == SYMENGINE_ADD
+        }
+    }
+
+    /// Get the base and exponent of a power expression
+    pub fn as_pow(&self) -> Option<(Expression, Expression)> {
+        if !self.is_pow() {
+            return None;
+        }
+        
+        unsafe {
+            let mut base = Expression {
+                basic: UnsafeCell::new(std::mem::zeroed()),
+            };
+            let mut exp = Expression {
+                basic: UnsafeCell::new(std::mem::zeroed()),
+            };
+            basic_new_stack(base.basic.get());
+            basic_new_stack(exp.basic.get());
+            
+            // Get the base and exponent
+            basic_pow_get_base(base.basic.get(), self.basic.get());
+            basic_pow_get_exp(exp.basic.get(), self.basic.get());
+            
+            Some((base, exp))
+        }
+    }
+
+    /// Get an iterator over the terms in an addition
+    pub fn as_add(&self) -> Option<Vec<Expression>> {
+        if !self.is_add() {
+            return None;
+        }
+        
+        unsafe {
+            let args_size = basic_get_args_size(self.basic.get());
+            let mut terms = Vec::new();
+            
+            for i in 0..args_size {
+                let mut term = Expression {
+                    basic: UnsafeCell::new(std::mem::zeroed()),
+                };
+                basic_new_stack(term.basic.get());
+                basic_get_arg(term.basic.get(), self.basic.get(), i);
+                terms.push(term);
+            }
+            
+            Some(terms)
+        }
+    }
+
+    /// Get an iterator over the factors in a multiplication
+    pub fn as_mul(&self) -> Option<Vec<Expression>> {
+        if !self.is_mul() {
+            return None;
+        }
+        
+        unsafe {
+            let args_size = basic_get_args_size(self.basic.get());
+            let mut factors = Vec::new();
+            
+            for i in 0..args_size {
+                let mut factor = Expression {
+                    basic: UnsafeCell::new(std::mem::zeroed()),
+                };
+                basic_new_stack(factor.basic.get());
+                basic_get_arg(factor.basic.get(), self.basic.get(), i);
+                factors.push(factor);
+            }
+            
+            Some(factors)
+        }
+    }
+
+    /// Get the symbol name if this is a symbol
+    pub fn as_symbol(&self) -> Option<String> {
+        if !self.is_symbol() {
+            return None;
+        }
+        
+        unsafe {
+            let name_ptr = basic_symbol_get_name(self.basic.get());
+            if name_ptr.is_null() {
+                return None;
+            }
+            let name_cstr = CStr::from_ptr(name_ptr);
+            Some(name_cstr.to_string_lossy().to_string())
+        }
+    }
+
+    /// Convert to f64 if this is a number
+    pub fn to_f64(&self) -> Option<f64> {
+        if !self.is_number() {
+            return None;
+        }
+        
+        unsafe {
+            let type_code = basic_get_type(self.basic.get());
+            match type_code {
+                SYMENGINE_REAL_DOUBLE => {
+                    let mut value = 0.0;
+                    real_double_get_d(&mut value, self.basic.get());
+                    Some(value)
+                }
+                SYMENGINE_INTEGER => {
+                    let value = integer_get_si(self.basic.get());
+                    Some(value as f64)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    /// Power operation
+    pub fn pow(&self, exp: Expression) -> Expression {
+        unsafe {
+            let mut new = Expression {
+                basic: UnsafeCell::new(std::mem::zeroed()),
+            };
+            basic_new_stack(new.basic.get());
+            basic_pow(new.basic.get(), self.basic.get(), exp.basic.get());
             new
         }
     }
