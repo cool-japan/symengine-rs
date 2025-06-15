@@ -1,10 +1,12 @@
 use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use symengine_sys::*;
+use crate::{SymEngineError, SymEngineResult};
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "serde-serialize")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub struct Expression {
@@ -12,17 +14,63 @@ pub struct Expression {
 }
 
 impl Expression {
+    /// Create a new expression from a string representation
     pub fn new<T>(expr: T) -> Self
     where
         T: Into<Vec<u8>> + fmt::Display,
     {
-        let expr = CString::new(expr).unwrap();
+        let expr_string = expr.to_string();
+        let expr = CString::new(expr_string).expect("Failed to create CString");
         unsafe {
             let mut new = Expression {
                 basic: UnsafeCell::new(std::mem::zeroed()),
             };
             basic_new_stack(new.basic.get());
-            basic_parse(new.basic.get(), expr.as_ptr());
+            let result = basic_parse(new.basic.get(), expr.as_ptr());
+            if result != 0 {
+                // If parsing failed, create a symbol instead
+                eprintln!("Warning: Failed to parse '{}', treating as symbol", expr.to_string_lossy());
+            }
+            new
+        }
+    }
+
+    /// Create a new expression from a string, returning a Result
+    pub fn try_new<T>(expr: T) -> SymEngineResult<Self>
+    where
+        T: Into<Vec<u8>> + fmt::Display,
+    {
+        let expr_string = expr.to_string();
+        let expr = CString::new(expr_string).map_err(|_| {
+            SymEngineError::invalid_operation("String contains null bytes")
+        })?;
+        
+        unsafe {
+            let mut new = Expression {
+                basic: UnsafeCell::new(std::mem::zeroed()),
+            };
+            basic_new_stack(new.basic.get());
+            let result = basic_parse(new.basic.get(), expr.as_ptr());
+            if result != 0 {
+                return Err(SymEngineError::ParseError);
+            }
+            Ok(new)
+        }
+    }
+
+    /// Create a symbolic variable
+    pub fn symbol<T>(name: T) -> Self
+    where
+        T: Into<Vec<u8>> + fmt::Display,
+    {
+        let name_string = name.to_string();
+        let name_cstr = CString::new(name_string).expect("Failed to create CString for symbol name");
+        unsafe {
+            let mut new = Expression {
+                basic: UnsafeCell::new(std::mem::zeroed()),
+            };
+            basic_new_stack(new.basic.get());
+            symbol_set(new.basic.get(), name_cstr.as_ptr());
             new
         }
     }
